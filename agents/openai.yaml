@@ -1,0 +1,4 @@
+interface:
+  display_name: "Remote iOS Deploy"
+  short_description: "Deploy to remote iPhones over a trusted network"
+  default_prompt: "Use $remote-ios-deploy to deploy this app to my remote iPhone and verify the transport and startup."
