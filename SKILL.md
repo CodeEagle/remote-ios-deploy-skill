@@ -9,6 +9,7 @@ Deploy from the user's chosen Mac, prove the transport, and verify the app remai
 
 ## Choose the path
 
+- **New phone, new deployment Mac, or uncertain pairing:** read [references/first-time-setup.md](references/first-time-setup.md) first. Explain the minimum phone-holder actions before starting. Remote first-time pairing is unvalidated; do not present this bridge as a way to bypass Trust or Developer Mode.
 - **Direct development deployment:** read [references/direct.md](references/direct.md). The Mac needs its own pairing trust, compatible Xcode, signing assets, and a reachable phone developer service. Use the supplied bridge and build/deploy scripts.
 - **Pure cellular / direct port unavailable:** distinguish overlay connectivity from developer-service availability. Our Wi-Fi → cellular → different Wi-Fi test failed on cellular and recovered on Wi-Fi. This is evidence about this bridge, not proof that all iOS distribution requires Wi-Fi. Do not keep retrying installation while the entry port is closed.
 - **User accepts tapping an installation link:** read [references/web-distribution.md](references/web-distribution.md). This changes the workflow and may publish a signed IPA containing device metadata. Confirm that change and audience before hosting. Do not automatically create App Store records, upload to TestFlight, or change developer teams.

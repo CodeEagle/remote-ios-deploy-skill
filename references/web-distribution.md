@@ -2,6 +2,8 @@
 
 Use only after the user accepts a tap-to-install flow instead of direct CoreDevice deployment. It cannot provide remote debugger access or prove an app started. Do not silently publish an IPA because direct installation failed.
 
+For a never-paired phone, read [First-time setup](first-time-setup.md#phone-is-already-remote-and-has-never-paired). Development-signed IPA installation still involves Developer Mode; a web link is not a guaranteed way around its initial setup. Distinguish it from properly signed Ad Hoc distribution and from TestFlight.
+
 Confirm the host and audience: the iOS installer must fetch the manifest and IPA without an interactive login. A normal private web page login may not be shared with the installer. An IPA contains the provisioning profile, potentially including registered device IDs and signing identities, though not the signing private key. Ask before making this downloadable to a wider audience. Never upload certificates, private keys, entire build trees, or app data.
 
 Use the user's installed Xcode help (`xcodebuild -help`) to confirm export methods. Newer Xcode uses `debugging` for development and `release-testing` for Ad Hoc; older names differ. An existing valid development profile may be sufficient for a development export. Do not claim it is an Ad Hoc distribution certificate. Verify the target UDID, certificate validity, Developer Mode requirements, and profile expiration.

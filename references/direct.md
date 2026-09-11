@@ -2,6 +2,8 @@
 
 ## Prepare a different Mac
 
+For a never-paired phone or a new deployment Mac, follow [First-time setup](first-time-setup.md) before using this procedure. An already valid pairing need not be repeated merely because the skill was installed.
+
 Use macOS, an Xcode version supporting the phone OS, Python 3, `socat` (`brew install socat`), and the macOS `dns-sd` utility. Set `DEVELOPER_DIR` to the intended Xcode installation if several exist. The phone must be in Developer Mode; unlock it when preparing developer support or launching.
 
 Pair **each deployment Mac** with the phone before it leaves, preferably with a one-time USB connection and a successful device build/run. A helper Mac's trust and a copied skill are not a substitute. Remote first-time pairing through this bridge has not been validated. Use the supported Xcode pairing workflow; do not export an entire Keychain or silently erase trust to repair a connection.
