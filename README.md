@@ -58,6 +58,12 @@ python3 -m unittest discover -s tests -v
 
 The default port coverage starts approximately 1006 socat processes, prioritizing validation over resource efficiency. Configure port ranges, addresses, and Bonjour values from actual device observations. The scripts do not automatically configure a VPN, pairing, certificates, firewall rules, or startup services. Expose listeners only on trusted networks, and stop the bridge when testing is complete.
 
+## Plugin package
+
+The [distributable plugin](plugins/remote-ios-deploy) contains manifests for Claude Code and Codex plus a self-contained copy of this skill. Directory submission and approval are separate; no marketplace listing is implied. See its README for local validation and use, and read the [privacy notice](PRIVACY.md) before sharing diagnostics.
+
+Maintainers: run `python3 scripts/package_plugin.py` after changing the canonical skill, then `python3 scripts/package_plugin.py --check`. Only explicitly allowlisted public files are copied; personal configuration and build artifacts are excluded.
+
 ## Credits
 
 The protocol-bridging approach was informed by [Kevin Paterson's original experiment](https://dev.to/kvnpt/how-to-remotely-iterate-deploy-your-sideloaded-ios-apps-over-tailnet-jak), with limitations refined through the documented iOS 27 cross-network tests. This repository does not copy that article's script; it provides independently implemented process supervision and deployment-verification helpers.

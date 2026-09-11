@@ -58,6 +58,12 @@ python3 -m unittest discover -s tests -v
 
 默认桥接范围会启动约 1006 个 socat 进程，适合验证而非资源优化。端口范围、地址和 Bonjour 数据需要按设备实测配置；脚本不会自动配置 VPN、配对、证书、防火墙或开机自启。仅在可信网络开放监听，测试结束及时停桥。
 
+## 插件包
+
+[可分发插件目录](plugins/remote-ios-deploy) 提供 Claude Code 和 Codex 清单，以及自包含的 skill 副本。提交审核不等于已收录；本仓库不暗示已经进入任何插件市场。其 README 包含本地验证和使用步骤；分享诊断信息前请阅读[隐私说明（英文）](PRIVACY.md)。
+
+维护时，修改根目录的原始 skill 后运行 `python3 scripts/package_plugin.py`，再用 `python3 scripts/package_plugin.py --check` 检查同步状态。只复制明确列出的公开文件，不包含个人配置或构建产物。
+
 ## 来源
 
 协议桥接思路参考 [Kevin Paterson 的原始实测](https://dev.to/kvnpt/how-to-remotely-iterate-deploy-your-sideloaded-ios-apps-over-tailnet-jak)，并结合本项目记录的 iOS 27 跨网络部署实测修正边界。本文没有复制该文的脚本；仓库提供独立实现的进程管理和部署验证辅助程序。

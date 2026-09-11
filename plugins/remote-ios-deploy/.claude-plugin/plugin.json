@@ -1,0 +1,12 @@
+{
+  "name": "remote-ios-deploy",
+  "version": "0.1.0",
+  "description": "Build, install and verify signed apps on an already-paired remote iPhone from a Mac. Requires local Xcode, signing, pairing and a reachable developer-service path; cross-network Wi-Fi is the verified direct route.",
+  "author": {
+    "name": "CodeEagle",
+    "url": "https://github.com/CodeEagle"
+  },
+  "homepage": "https://github.com/CodeEagle/remote-ios-deploy-skill",
+  "repository": "https://github.com/CodeEagle/remote-ios-deploy-skill",
+  "keywords": ["ios", "deployment", "xcode", "remote", "macos"]
+}

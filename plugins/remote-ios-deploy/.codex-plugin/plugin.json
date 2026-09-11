@@ -1,0 +1,28 @@
+{
+  "name": "remote-ios-deploy",
+  "version": "0.1.0",
+  "description": "Build, install and verify signed apps on an already-paired remote iPhone from a Mac.",
+  "author": {
+    "name": "CodeEagle",
+    "url": "https://github.com/CodeEagle"
+  },
+  "skills": "./skills/",
+  "homepage": "https://github.com/CodeEagle/remote-ios-deploy-skill",
+  "repository": "https://github.com/CodeEagle/remote-ios-deploy-skill",
+  "keywords": ["ios", "deployment", "xcode", "remote", "macos"],
+  "interface": {
+    "displayName": "Remote iOS Deploy",
+    "shortDescription": "Deploy signed apps to a paired remote iPhone from your Mac.",
+    "longDescription": "A local macOS development workflow for explicit Bonjour and TCP/UDP bridging, fresh Xcode builds, signing checks and sustained startup verification. Requires compatible Xcode, Python 3, socat, valid signing and existing Mac-phone pairing. Cross-network Wi-Fi installation was verified; direct cellular deployment and remote first-time pairing are not supported as validated workflows. Requires local application and hardware access; not a cloud-only deployment service.",
+    "developerName": "CodeEagle",
+    "category": "Developer Tools",
+    "capabilities": ["Write"],
+    "websiteURL": "https://github.com/CodeEagle/remote-ios-deploy-skill",
+    "privacyPolicyURL": "https://github.com/CodeEagle/remote-ios-deploy-skill/blob/main/PRIVACY.md",
+    "defaultPrompt": [
+      "Deploy my current project to my paired remote iPhone.",
+      "Explain first-time setup for a new phone or deployment Mac.",
+      "Diagnose a remote iPhone deployment connection failure."
+    ]
+  }
+}
