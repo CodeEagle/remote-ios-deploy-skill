@@ -39,10 +39,15 @@ Copy `assets/bridge.env.example` to a private location and replace every value. 
 ```bash
 source /private/path/bridge.env
 python3 /path/to/remote-ios-deploy/scripts/bridge.py --check
+# Static supervisor: pinned TUNNEL_PORTS (pre-iOS-27 environments)
 python3 /path/to/remote-ios-deploy/scripts/bridge.py > /private/path/bridge.log 2>&1
+# Dynamic supervisor: iOS 27 re-drifts the tunnel endpoint every session
+python3 /path/to/remote-ios-deploy/scripts/bridge-dynamic.py > /private/path/bridge.log 2>&1
 ```
 
-The check only probes the control port. Starting the bridge also checks all TCP/UDP listener bindings. The default data ranges plus the control port create **1006 relay processes**; this favors compatibility with observed ports over resource efficiency. Narrow the ranges only with evidence, expand if the phone negotiates outside them. This is not a promise that every iOS version uses these ports.
+The check only probes the control port. Starting **bridge.py** also checks all TCP/UDP listener bindings; the default data ranges plus the control port create **1006 relay processes**, favoring compatibility with observed ports over resource efficiency. Narrow the ranges only with evidence, expand if the phone negotiates outside them.
+
+On **iOS 27** the CoreDevice tunnel endpoint re-drifts every session (~33s, the port counter incrementing by one), so any fixed range is refused and installs fail with `RemotePairingError code 4`. Prefer **bridge-dynamic.py**: it tails `log stream` for freshly negotiated endpoints, raises one TCP+UDP relay per port, and prefetches the next `PREFETCH` ports (default 8) so a relay is already listening before `remotepairingd` connects — that daemon connects within ~5-10ms of seeing an endpoint, so a purely reactive relay is always too late. Relays with no established connection are reaped after `IDLE_TTL` (600s). Verified outcome: `Tunnel connection established` with zero refused after switching, where the static bridge refused every drift cycle. Neither variant is a promise that a given iOS version uses these ports.
 
 Keep the foreground bridge running; Ctrl-C terminates only its own process groups, including relay children. Never start duplicates or use `killall socat`. No LaunchAgent, automatic network reconfiguration, or firewall changes are installed by this skill. The script can be run from anywhere; it does not read a config file implicitly.
 
