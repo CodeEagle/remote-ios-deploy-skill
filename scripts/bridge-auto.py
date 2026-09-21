@@ -142,6 +142,33 @@ class Bridge:
     def _spawn(self, cmd: list[str]) -> subprocess.Popen:
         return subprocess.Popen(cmd, start_new_session=True)
 
+    @staticmethod
+    def _terminate(child: subprocess.Popen,
+                   *, sig: int = signal.SIGTERM, timeout: float = 5.0) -> None:
+        """Deliver a signal and wait for real exit.
+
+        socat fork children and `dns-sd -P` both re-parent away from their
+        original process group, so a group-wide killpg can silently miss them
+        and leave orphaned listeners / Bonjour records behind.
+        """
+        if child.poll() is not None:
+            return
+        try:
+            child.send_signal(sig)
+        except (ProcessLookupError, PermissionError):
+            return
+        try:
+            child.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                child.kill()
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                child.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                pass
+
     def up(self, port: int, *, warmup: bool = False) -> None:
         if not (MIN_PORT <= port <= MAX_PORT):
             return
@@ -163,20 +190,8 @@ class Bridge:
     def down(self, port: int) -> None:
         for protocol in ("TCP", "UDP"):
             child = self.relays.pop((port, protocol), None)
-            if child is None:
-                continue
-            try:
-                os.killpg(child.pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
-            try:
-                child.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(child.pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
-                child.wait()
+            if child is not None:
+                self._terminate(child)
         self.prefetched.discard(port)
         self.last_seen.pop(port, None)
         print(f"[relay] down {port} (idle)", flush=True)
@@ -268,20 +283,8 @@ class Bridge:
             self.log_proc.terminate()
         for child in [*self.relays.values(),
                       *([self.publisher] if self.publisher else [])]:
-            try:
-                os.killpg(child.pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
-        for child in [*self.relays.values(),
-                      *([self.publisher] if self.publisher else [])]:
-            try:
-                child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(child.pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
-                child.wait()
+            if isinstance(child, subprocess.Popen):
+                self._terminate(child)
 
 
 async def main() -> int:
