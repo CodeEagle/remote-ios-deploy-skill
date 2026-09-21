@@ -174,8 +174,14 @@ class Bridge:
             return
         now = time.time()
         self.last_seen[port] = now
-        if (port, "TCP") in self.relays:
+        if (port, "TCP") in self.relays and (port, "UDP") in self.relays:
             return
+        # A half-lived pair (one protocol died) cannot serve both directions.
+        for protocol in ("TCP", "UDP"):
+            child = self.relays.pop((port, protocol), None)
+            if child is not None:
+                self._terminate(child)
+        self._clear_orphan_listeners(port)
         for protocol in ("TCP", "UDP"):
             self.relays[(port, protocol)] = self._spawn(relay_command(port, protocol))
         print(f"[relay:{'warmup' if warmup else 'dynamic'}] up {port} "
@@ -186,6 +192,54 @@ class Bridge:
             self.last_real = now
             for nxt in range(port + 1, port + 1 + PREFETCH):
                 self.up(nxt, warmup=True)
+
+    def _clear_orphan_listeners(self, port: int) -> None:
+        """Kill socat listeners left behind by a crashed or SIGKILLed bridge.
+
+        A forcible bridge death orphans its socat relays to init; a LISTEN
+        socket never closes on its own, so the restarted bridge cannot rebind
+        the control port and Xcode connections are refused. Only orphans are
+        touched: a listener whose parent is still alive belongs to a running
+        bridge and must not be shot.
+        """
+        try:
+            out = subprocess.run(
+                ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"],
+                capture_output=True, text=True, timeout=15).stdout
+            out += subprocess.run(
+                ["lsof", "-nP", f"-iUDP:{port}"],
+                capture_output=True, text=True, timeout=15).stdout
+        except (OSError, subprocess.SubprocessError):
+            return
+        for line in out.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) < 2 or not parts[1].isdigit():
+                continue
+            pid = int(parts[1])
+            if pid == os.getpid():
+                continue
+            try:
+                cmd = subprocess.run(
+                    ["ps", "-o", "command=", "-p", str(pid)],
+                    capture_output=True, text=True, timeout=10).stdout
+                ppid = subprocess.run(
+                    ["ps", "-o", "ppid=", "-p", str(pid)],
+                    capture_output=True, text=True, timeout=10).stdout.strip()
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if PHONE not in cmd or ppid != "1":
+                continue
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.kill(pid, sig)
+                except (ProcessLookupError, PermissionError):
+                    break
+                gone = subprocess.run(["ps", "-p", str(pid)],
+                                      capture_output=True, timeout=10)
+                if gone.returncode != 0:
+                    break
+            print(f"[relay] reclaimed orphan listener {pid} on {port}",
+                  flush=True)
 
     def down(self, port: int) -> None:
         for protocol in ("TCP", "UDP"):
@@ -214,7 +268,16 @@ class Bridge:
             child = self.relays[key]
             if child.poll() is not None:
                 self.relays.pop(key, None)
-                print(f"[relay] {key} exited early (rc={child.returncode})", flush=True)
+                print(f"[relay] {key} exited early (rc={child.returncode})",
+                      flush=True)
+        # A relay that died — usually a lost bind to a leftover listener —
+        # must be re-laid, or the bridge advertises a port it cannot serve.
+        for port in list(self.last_seen):
+            if (port, "TCP") not in self.relays or \
+                    (port, "UDP") not in self.relays:
+                self.relays.pop((port, "TCP"), None)
+                self.relays.pop((port, "UDP"), None)
+                self.up(port)
 
     def poll_endpoints(self) -> list[int]:
         try:
