@@ -197,6 +197,8 @@ class Bridge:
         print(f"[relay] down {port} (idle)", flush=True)
 
     def publish(self) -> None:
+        if self.stopping:
+            return
         if self.publisher is not None and self.publisher.poll() is None:
             return
         self.publisher = self._spawn([
@@ -281,10 +283,14 @@ class Bridge:
         self.stopping = True
         if self.log_proc is not None and self.log_proc.returncode is None:
             self.log_proc.terminate()
-        for child in [*self.relays.values(),
-                      *([self.publisher] if self.publisher else [])]:
-            if isinstance(child, subprocess.Popen):
-                self._terminate(child)
+        # dns-sd reacts to SIGTERM by forking an untrackable background process
+        # to finish the mDNS deregistration handshake, which then lingers on the
+        # LAN as a stale _remotepairing._tcp publisher. SIGKILL lets mDNSResponder
+        # reclaim the record through its client-death detection instead.
+        if self.publisher is not None:
+            self._terminate(self.publisher, sig=signal.SIGKILL)
+        for child in self.relays.values():
+            self._terminate(child)
 
 
 async def main() -> int:
@@ -327,6 +333,8 @@ async def main() -> int:
             await asyncio.sleep(HEALTH_INTERVAL)
             bridge.reap_dead()
             if bridge.publisher is not None and bridge.publisher.poll() is not None:
+                if bridge.stopping:
+                    continue
                 print("[publish] dns-sd exited; restarting", flush=True)
                 bridge.publish()
 
