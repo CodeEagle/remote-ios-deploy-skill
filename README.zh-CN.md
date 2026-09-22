@@ -52,11 +52,16 @@ git clone https://github.com/CodeEagle/remote-ios-deploy-skill.git ~/.codex/skil
 
 ```bash
 python3 scripts/bridge.py --help
+python3 scripts/bridge-dynamic.py --help
+python3 scripts/bridge-auto.py  # 常驻桥：需提供 PHONE=<手机 overlay 地址>
+python3 scripts/bridge-auto-install.py --yes  # 安装为 launchd LaunchAgent
 python3 scripts/build_deploy.py --help
 python3 -m unittest discover -s tests -v
 ```
 
-默认桥接范围会启动约 1006 个 socat 进程，适合验证而非资源优化。端口范围、地址和 Bonjour 数据需要按设备实测配置；脚本不会自动配置 VPN、配对、证书、防火墙或开机自启。仅在可信网络开放监听，测试结束及时停桥。
+按手机 iOS 版本选桥：`bridge.py` 固定 `TUNNEL_PORTS`（iOS 27 之前）；**iOS 27** 上协商的隧道端点每次会话都漂移，应改用 `bridge-dynamic.py` 或 `bridge-auto.py`，两者都会跟随漂移。`bridge-auto.py` 是常驻形态——用 `scripts/bridge-auto-install.py` 一次性安装为 launchd LaunchAgent（`RunAtLoad` + `KeepAlive`），之后跨登录、崩溃和端点漂移保持在线，只需提供手机的 overlay 地址。完整对比与 iOS 27 实测见 [SKILL.md](SKILL.md)。
+
+静态 `bridge.py` 的默认端口范围会启动约 1006 个 socat 进程，适合验证而非资源优化；动态与常驻桥改为每个协商端点只起一个中继。端口范围、地址和 Bonjour 数据需要按设备实测配置；除可选的 `bridge-auto-install.py` LaunchAgent 外，脚本不配置 VPN、配对、证书或防火墙。仅在可信网络开放监听，测试结束及时停桥。
 
 ## 插件包
 

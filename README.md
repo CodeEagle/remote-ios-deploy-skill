@@ -52,11 +52,16 @@ The scripts require Python 3. Bridging also requires macOS `dns-sd` and `socat`;
 
 ```bash
 python3 scripts/bridge.py --help
+python3 scripts/bridge-dynamic.py --help
+python3 scripts/bridge-auto.py  # resident bridge: PHONE=<overlay-ip> required
+python3 scripts/bridge-auto-install.py --yes  # install it as a launchd LaunchAgent
 python3 scripts/build_deploy.py --help
 python3 -m unittest discover -s tests -v
 ```
 
-The default port coverage starts approximately 1006 socat processes, prioritizing validation over resource efficiency. Configure port ranges, addresses, and Bonjour values from actual device observations. The scripts do not automatically configure a VPN, pairing, certificates, firewall rules, or startup services. Expose listeners only on trusted networks, and stop the bridge when testing is complete.
+Pick the bridge for the phone's iOS: `bridge.py` pins fixed `TUNNEL_PORTS` (pre-iOS 27); on **iOS 27** the negotiated tunnel endpoint re-drifts every session, so run `bridge-dynamic.py` or `bridge-auto.py` instead, both of which follow the drift. `bridge-auto.py` is the resident form — install it once with `scripts/bridge-auto-install.py` as a launchd LaunchAgent (`RunAtLoad` + `KeepAlive`) and it stays up across login, crashes, and endpoint drift, requiring only the phone's overlay address. See [SKILL.md](SKILL.md) for the full comparison and the iOS 27 evidence.
+
+The static `bridge.py` default port coverage starts approximately 1006 socat processes, prioritizing validation over resource efficiency; the dynamic and resident variants raise one relay per negotiated port instead. Configure port ranges, addresses, and Bonjour values from actual device observations. Apart from the optional `bridge-auto-install.py` LaunchAgent, the scripts do not configure a VPN, pairing, certificates, or firewall rules. Expose listeners only on trusted networks, and stop the bridge when testing is complete.
 
 ## Plugin package
 
