@@ -133,6 +133,7 @@ class Bridge:
         self.last_real = 0.0
         self.prefetched: set[int] = set()
         self.publisher: subprocess.Popen | None = None
+        self.log_proc: asyncio.subprocess.Process | None = None
         self.stopping = False
         self.control_ok = False
         self.lookback = POLL_LOOKBACK_START
