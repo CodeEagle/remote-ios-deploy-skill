@@ -174,6 +174,13 @@ class Bridge:
             return
         now = time.time()
         self.last_seen[port] = now
+        # A relay recorded here may be a zombie: socat can have exited while
+        # the dict still holds it, so a naive membership check re-spawns a
+        # listener that cannot bind ("Address already in use") forever.
+        for protocol in ("TCP", "UDP"):
+            child = self.relays.get((port, protocol))
+            if child is not None and child.poll() is not None:
+                self.relays.pop((port, protocol), None)
         if (port, "TCP") in self.relays and (port, "UDP") in self.relays:
             return
         # A half-lived pair (one protocol died) cannot serve both directions.
@@ -405,7 +412,8 @@ async def main() -> int:
                 bridge.poll_due = now + POLL_INTERVAL
                 alive = probe_control()
                 if alive != bridge.control_ok:
-                    print(f"[health] control {bridge.control_ok} -> {alive}", flush=True)
+                    print(f"[health] control {bridge.control_ok} -> {alive}",
+                          flush=True)
                     bridge.control_ok = alive
                     bridge.lookback = POLL_LOOKBACK_MAX
                 if not alive:
@@ -413,6 +421,10 @@ async def main() -> int:
                         bridge.up(port)
                     if not any(p != CONTROL_PORT for p in bridge.last_seen):
                         bridge.sweep_tunnel_bands()
+                elif bridge.control_ok:
+                    # Control channel is up: a warmup port whose socat has
+                    # died is stale, not a reason to re-sweep the bands.
+                    bridge.reap_dead()
                 if bridge.bootstrap_retry and now >= bridge.bootstrap_retry:
                     bridge.bootstrap_retry = 0.0
                     found = bridge.poll_endpoints()
