@@ -30,6 +30,15 @@ These discovery commands run continuously; stop after collecting the needed reco
 
 Capture hostname, service port, identifier, authTag, ver, minVer, and flags. UUID/TXT values may rotate. Previously captured values survived one observed switch, not all future sessions. No helper here auto-discovers a fresh remote Bonjour record after rotation.
 
+When the phone is already remote and no trusted Mac sits on its current LAN, the real Bonjour instance can still be recovered from the deployment Mac's own `remotepairingd` history — it logs which adverts resolved to a known paired identity:
+
+```bash
+/usr/bin/log show --last 3d --style compact --predicate 'process == "remotepairingd"' \
+  | grep 'Resolved bonjour advert'
+```
+
+An advert that resolved `to identity associated with udid <phone-udid>` is a real, still-trusted instance for this Mac. Do **not** substitute the CoreDevice identifier that `devicectl list devices` prints (the `…coredevice.local` hostname component) for the Bonjour instance — they are separate identifiers, and an advert carrying it resolves to `identity nil` and is tracked as an unauth device, surfacing as CoreDevice error 4016. A value that authenticates once stays valid until the pairing rotates; re-verify against this log before changing `RP_INSTANCE`.
+
 Resolve the phone's overlay endpoint from its device/network information. Probe known candidates belonging to this phone only. Verify that a friendly hostname resolves to the actual developer-service endpoint; do not derive another address by changing an IP suffix without evidence.
 
 ## Configure and run
