@@ -61,6 +61,12 @@ BOOTSTRAP_RETRY = 20.0
 POLL_LOOKBACK_START = 30
 POLL_LOOKBACK_MAX = 600
 TUNNEL_BANDS = [(49800, 50000), (55000, 55300)]
+# remotepairingd does not re-discover a Bonjour record that stays up: once a
+# control channel is invalidated (phone Wi-Fi switch, daemon restart) it waits
+# for a fresh browse event. Renewing the record supplies one. The tunnel
+# endpoint watcher resets this on every negotiated port, so it only fires when
+# the daemon has truly gone quiet, not merely drifted ports.
+TUNNEL_QUIET_TTL = float(os.environ.get("TUNNEL_QUIET_TTL", "300"))
 
 
 def _local_lan_ipv4() -> str:
@@ -134,6 +140,7 @@ class Bridge:
         self.prefetched: set[int] = set()
         self.publisher: subprocess.Popen | None = None
         self.log_proc: asyncio.subprocess.Process | None = None
+        self.last_tunnel_activity = time.time()
         self.stopping = False
         self.control_ok = False
         self.lookback = POLL_LOOKBACK_START
@@ -271,6 +278,19 @@ class Bridge:
         print(f"[publish] {RP_INSTANCE} authTag={RP_AUTHTAG} "
               f"@ {LOCAL_IP}:{CONTROL_PORT}", flush=True)
 
+    def renew_advert(self) -> None:
+        """Force a Bonjour remove/add so remotepairingd re-discovers the device.
+
+        A record that stays published never generates a new browse event, so
+        after an invalidated control channel the daemon waits indefinitely.
+        SIGKILL lets mDNSResponder reclaim the record through client-death
+        detection; the health loop then republishes it.
+        """
+        if self.publisher is None or self.publisher.poll() is not None:
+            return
+        self._terminate(self.publisher, sig=signal.SIGKILL)
+        print("[publish] renewing advert to re-trigger discovery", flush=True)
+
     def reap_dead(self) -> None:
         for key in list(self.relays):
             child = self.relays[key]
@@ -296,6 +316,8 @@ class Bridge:
         except (OSError, subprocess.SubprocessError):
             return []
         ports = [int(m.group(1)) for m in ENDPOINT_RE.finditer(out)]
+        if ports:
+            self.last_tunnel_activity = time.time()
         self.lookback = POLL_LOOKBACK_START if ports else min(self.lookback * 2,
                                                               POLL_LOOKBACK_MAX)
         return ports
@@ -318,6 +340,7 @@ class Bridge:
             assert proc.stdout
             async for raw in proc.stdout:
                 for match in ENDPOINT_RE.finditer(raw.decode("utf-8", "replace")):
+                    self.last_tunnel_activity = time.time()
                     self.up(int(match.group(1)))
             if not self.stopping:
                 print("[watch] log stream ended; restarting", flush=True)
@@ -408,6 +431,20 @@ async def main() -> int:
                     continue
                 print("[publish] dns-sd exited; restarting", flush=True)
                 bridge.publish()
+
+            # remotepairingd gives no signal when a control channel dies while
+            # the TCP control port still answers, so probe_control() alone
+            # reports health while the device is in fact unavailable. Renewing
+            # the advert after a quiet interval is the only automatic way to
+            # make the daemon re-discover and rebuild the tunnel.
+            if (not bridge.stopping and bridge.publisher is not None
+                    and bridge.publisher.poll() is None
+                    and now - bridge.last_tunnel_activity > TUNNEL_QUIET_TTL):
+                bridge.last_tunnel_activity = now
+                print("[health] no tunnel endpoint for "
+                      f"{TUNNEL_QUIET_TTL:.0f}s; renewing advert",
+                      flush=True)
+                bridge.renew_advert()
 
             if now >= bridge.poll_due:
                 bridge.poll_due = now + POLL_INTERVAL

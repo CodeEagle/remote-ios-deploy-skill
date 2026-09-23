@@ -165,3 +165,75 @@ bridge.supervise(json.loads(sys.argv[2]),sys.argv[3],'fake-discovery')
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TunnelWatchdogTests(unittest.TestCase):
+    """remotepairingd never re-discovers a record that stays published, so
+    bridge-auto must renew its advert when the daemon goes quiet."""
+
+    @staticmethod
+    def _load_auto():
+        env = {**os.environ, 'PHONE': 'fd00:dead:beef::1', 'LOCAL_IP': '127.0.0.1'}
+        with mock.patch.dict(os.environ, env):
+            return module('bridge-auto')
+
+    def test_renew_advert_sigkills_a_live_publisher(self):
+        auto = self._load_auto()
+        br = auto.Bridge()
+        proc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            br.publisher = proc
+            br.renew_advert()
+            proc.wait(timeout=10)
+            self.assertIsNotNone(proc.returncode)
+            self.assertNotEqual(proc.returncode, 0)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+
+    def test_renew_advert_ignores_missing_or_dead_publisher(self):
+        auto = self._load_auto()
+        br = auto.Bridge()
+        br.publisher = None
+        br.renew_advert()          # must not raise
+        dead = subprocess.Popen([sys.executable, '-c', ''],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        dead.wait(timeout=5)
+        br.publisher = dead
+        br.renew_advert()          # already exited: no-op, no exception
+        self.assertIsNotNone(dead.returncode)
+
+    def test_quiet_watchdog_fires_after_ttl(self):
+        auto = self._load_auto()
+        old_ttl = auto.TUNNEL_QUIET_TTL
+        auto.TUNNEL_QUIET_TTL = 0.0
+        try:
+            br = auto.Bridge()
+            br.last_tunnel_activity = time.time() - 10
+            proc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                br.publisher = proc
+                br.renew_advert()
+                proc.wait(timeout=10)
+                self.assertIsNotNone(proc.returncode)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=5)
+        finally:
+            auto.TUNNEL_QUIET_TTL = old_ttl
+
+    def test_tunnel_activity_resets_the_quiet_clock(self):
+        auto = self._load_auto()
+        br = auto.Bridge()
+        br.last_tunnel_activity = 0.0
+        # poll_endpoints() must refresh the clock whenever it finds a port.
+        with mock.patch.object(auto, 'subprocess') as sub:
+            sub.run.return_value.stdout = (
+                'Got tunnel endpoint: \'127.0.0.1%en1:49999\'')
+            ports = br.poll_endpoints()
+        self.assertEqual(ports, [49999])
+        self.assertGreater(br.last_tunnel_activity, 0.0)
