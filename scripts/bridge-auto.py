@@ -63,9 +63,9 @@ POLL_LOOKBACK_MAX = 600
 TUNNEL_BANDS = [(49800, 50000), (55000, 55300)]
 # remotepairingd does not re-discover a Bonjour record that stays up: once a
 # control channel is invalidated (phone Wi-Fi switch, daemon restart) it waits
-# for a fresh browse event. Renewing the record supplies one. The tunnel
-# endpoint watcher resets this on every negotiated port, so it only fires when
-# the daemon has truly gone quiet, not merely drifted ports.
+# for a fresh browse event. Renewing the record supplies one. Tunnels are
+# established on demand, so idle devices emit no endpoint events. Renew only
+# once when observed tunnel activity becomes quiet; new activity rearms it.
 TUNNEL_QUIET_TTL = float(os.environ.get("TUNNEL_QUIET_TTL", "300"))
 
 
@@ -141,6 +141,7 @@ class Bridge:
         self.publisher: subprocess.Popen | None = None
         self.log_proc: asyncio.subprocess.Process | None = None
         self.last_tunnel_activity = time.time()
+        self.had_tunnel: bool = False
         self.stopping = False
         self.control_ok = False
         self.lookback = POLL_LOOKBACK_START
@@ -191,14 +192,11 @@ class Bridge:
                 self.relays.pop((port, protocol), None)
         if (port, "TCP") in self.relays and (port, "UDP") in self.relays:
             return
-        # A half-lived pair (one protocol died) cannot serve both directions.
-        for protocol in ("TCP", "UDP"):
-            child = self.relays.pop((port, protocol), None)
-            if child is not None:
-                self._terminate(child)
+        # Preserve any live half of the pair and replace only missing relays.
         self._clear_orphan_listeners(port)
         for protocol in ("TCP", "UDP"):
-            self.relays[(port, protocol)] = self._spawn(relay_command(port, protocol))
+            if (port, protocol) not in self.relays:
+                self.relays[(port, protocol)] = self._spawn(relay_command(port, protocol))
         print(f"[relay:{'warmup' if warmup else 'dynamic'}] up {port} "
               f"(TCP+UDP) -> [{PHONE}]:{port}", flush=True)
         if warmup:
@@ -303,8 +301,6 @@ class Bridge:
         for port in list(self.last_seen):
             if (port, "TCP") not in self.relays or \
                     (port, "UDP") not in self.relays:
-                self.relays.pop((port, "TCP"), None)
-                self.relays.pop((port, "UDP"), None)
                 self.up(port)
 
     def poll_endpoints(self) -> list[int]:
@@ -318,6 +314,7 @@ class Bridge:
         ports = [int(m.group(1)) for m in ENDPOINT_RE.finditer(out)]
         if ports:
             self.last_tunnel_activity = time.time()
+            self.had_tunnel = True
         self.lookback = POLL_LOOKBACK_START if ports else min(self.lookback * 2,
                                                               POLL_LOOKBACK_MAX)
         return ports
@@ -341,6 +338,7 @@ class Bridge:
             async for raw in proc.stdout:
                 for match in ENDPOINT_RE.finditer(raw.decode("utf-8", "replace")):
                     self.last_tunnel_activity = time.time()
+                    self.had_tunnel = True
                     self.up(int(match.group(1)))
             if not self.stopping:
                 print("[watch] log stream ended; restarting", flush=True)
@@ -423,8 +421,10 @@ async def main() -> int:
              asyncio.create_task(bridge.cleanup_loop())]
     try:
         while not bridge.stopping:
-            now = time.time()
             await asyncio.sleep(HEALTH_INTERVAL)
+            if bridge.stopping:
+                continue
+            now = time.time()
             bridge.reap_dead()
             if bridge.publisher is not None and bridge.publisher.poll() is not None:
                 if bridge.stopping:
@@ -434,17 +434,19 @@ async def main() -> int:
 
             # remotepairingd gives no signal when a control channel dies while
             # the TCP control port still answers, so probe_control() alone
-            # reports health while the device is in fact unavailable. Renewing
-            # the advert after a quiet interval is the only automatic way to
-            # make the daemon re-discover and rebuild the tunnel.
+            # reports health while the device is in fact unavailable. Renew
+            # once after observed tunnel activity goes quiet, then wait for
+            # new activity to rearm: an idle device needs no tunnel.
             if (not bridge.stopping and bridge.publisher is not None
                     and bridge.publisher.poll() is None
+                    and bridge.had_tunnel
                     and now - bridge.last_tunnel_activity > TUNNEL_QUIET_TTL):
                 bridge.last_tunnel_activity = now
                 print("[health] no tunnel endpoint for "
                       f"{TUNNEL_QUIET_TTL:.0f}s; renewing advert",
                       flush=True)
                 bridge.renew_advert()
+                bridge.had_tunnel = False
 
             if now >= bridge.poll_due:
                 bridge.poll_due = now + POLL_INTERVAL

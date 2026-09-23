@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import json
 import os
@@ -168,8 +169,7 @@ if __name__ == '__main__':
 
 
 class TunnelWatchdogTests(unittest.TestCase):
-    """remotepairingd never re-discovers a record that stays published, so
-    bridge-auto must renew its advert when the daemon goes quiet."""
+    """Renew once when observed tunnel activity goes quiet, never for pure idle."""
 
     @staticmethod
     def _load_auto():
@@ -205,26 +205,79 @@ class TunnelWatchdogTests(unittest.TestCase):
         br.renew_advert()          # already exited: no-op, no exception
         self.assertIsNotNone(dead.returncode)
 
+    def _run_health(self, auto, br, ticks):
+        # Exercise main's real condition without network, subprocesses or signals.
+        clock = mock.Mock(return_value=1000.0)
+        ticks = iter(ticks)
+
+        async def sleep(delay):
+            if delay == auto.HEALTH_INTERVAL:
+                tick = next(ticks, None)
+                if tick is None:
+                    br.stopping = True
+                else:
+                    clock.return_value = tick
+
+        br.publisher = mock.Mock()
+        br.publisher.poll.return_value = None
+        br.poll_due = float('inf')
+        with mock.patch.object(auto, 'Bridge', return_value=br), \
+             mock.patch.object(auto.shutil, 'which', return_value='/mock/tool'), \
+             mock.patch.object(auto, 'probe_control', return_value=True), \
+             mock.patch.object(auto.time, 'time', clock), \
+             mock.patch.object(auto.asyncio, 'sleep', side_effect=sleep), \
+             mock.patch.object(br, 'up') as up, \
+             mock.patch.object(br, 'reap_dead') as reap, \
+             mock.patch.object(br, 'poll_endpoints', return_value=[]), \
+             mock.patch.object(br, 'publish') as publish, \
+             mock.patch.object(br, 'renew_advert') as renew, \
+             mock.patch.object(br, 'watch', new_callable=mock.AsyncMock), \
+             mock.patch.object(br, 'cleanup_loop', new_callable=mock.AsyncMock):
+            async def run():
+                loop = asyncio.get_running_loop()
+                with mock.patch.object(loop, 'add_signal_handler'):
+                    return await auto.main()
+            self.assertEqual(asyncio.run(run()), 0)
+        return renew, up, reap, publish
+
     def test_quiet_watchdog_fires_after_ttl(self):
         auto = self._load_auto()
-        old_ttl = auto.TUNNEL_QUIET_TTL
-        auto.TUNNEL_QUIET_TTL = 0.0
-        try:
-            br = auto.Bridge()
-            br.last_tunnel_activity = time.time() - 10
-            proc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            try:
-                br.publisher = proc
-                br.renew_advert()
-                proc.wait(timeout=10)
-                self.assertIsNotNone(proc.returncode)
-            finally:
-                if proc.poll() is None:
-                    proc.kill()
-                    proc.wait(timeout=5)
-        finally:
-            auto.TUNNEL_QUIET_TTL = old_ttl
+        auto.TUNNEL_QUIET_TTL = 300.0
+        br = auto.Bridge()
+        br.had_tunnel = True
+        br.last_tunnel_activity = 1000.0
+        renew, _, _, _ = self._run_health(auto, br, [1301.0, 1700.0])
+        renew.assert_called_once_with()
+        self.assertFalse(br.had_tunnel)
+
+    def test_idle_without_tunnel_does_not_renew(self):
+        auto = self._load_auto()
+        br = auto.Bridge()
+        self.assertFalse(br.had_tunnel)
+        br.last_tunnel_activity = 0.0
+        renew, _, _, _ = self._run_health(auto, br, [1000.0 + auto.TUNNEL_QUIET_TTL])
+        renew.assert_not_called()
+        self.assertFalse(br.had_tunnel)
+
+    def test_recent_tunnel_does_not_renew(self):
+        auto = self._load_auto()
+        auto.TUNNEL_QUIET_TTL = 300.0
+        br = auto.Bridge()
+        br.had_tunnel = True
+        br.last_tunnel_activity = 1000.0
+        renew, _, _, _ = self._run_health(auto, br, [1100.0, 1300.0])
+        renew.assert_not_called()
+        self.assertTrue(br.had_tunnel)
+
+    def test_stopping_during_health_sleep_skips_rebuild(self):
+        auto = self._load_auto()
+        br = auto.Bridge()
+        renew, up, reap, publish = self._run_health(auto, br, [])
+        # Only startup calls are allowed; the health iteration must do no work.
+        up.assert_called_once_with(auto.CONTROL_PORT)
+        reap.assert_called_once_with()
+        publish.assert_called_once_with()
+        renew.assert_not_called()
 
     def test_tunnel_activity_resets_the_quiet_clock(self):
         auto = self._load_auto()
@@ -237,3 +290,47 @@ class TunnelWatchdogTests(unittest.TestCase):
             ports = br.poll_endpoints()
         self.assertEqual(ports, [49999])
         self.assertGreater(br.last_tunnel_activity, 0.0)
+        self.assertTrue(br.had_tunnel)
+
+    def test_watch_tunnel_activity_rearms_watchdog(self):
+        auto = self._load_auto()
+        br = auto.Bridge()
+        br.last_tunnel_activity = 0.0
+
+        async def lines():
+            yield b"Got tunnel endpoint: '127.0.0.1%en1:49999'"
+            br.stopping = True
+
+        proc = mock.Mock(stdout=lines())
+        with mock.patch.object(auto.asyncio, 'create_subprocess_exec',
+                               new_callable=mock.AsyncMock, return_value=proc), \
+             mock.patch.object(br, 'up') as up:
+            asyncio.run(br.watch())
+        up.assert_called_once_with(49999)
+        self.assertGreater(br.last_tunnel_activity, 0.0)
+        self.assertTrue(br.had_tunnel)
+
+    def test_reap_dead_preserves_live_half(self):
+        auto = self._load_auto()
+        for dead_protocol, live_protocol in [('TCP', 'UDP'), ('UDP', 'TCP')]:
+            with self.subTest(dead_protocol=dead_protocol):
+                br = auto.Bridge()
+                port = auto.CONTROL_PORT
+                dead = mock.Mock(returncode=1)
+                dead.poll.return_value = 1
+                live = mock.Mock()
+                live.poll.return_value = None
+                replacement = mock.Mock()
+                br.relays = {(port, dead_protocol): dead, (port, live_protocol): live}
+                br.last_seen[port] = 0.0
+                with mock.patch.object(br, '_spawn', return_value=replacement) as spawn, \
+                     mock.patch.object(br, '_terminate') as terminate, \
+                     mock.patch.object(br, '_clear_orphan_listeners'), \
+                     mock.patch.object(auto, 'relay_command', return_value=['mock-relay']) as command:
+                    br.reap_dead()
+                self.assertIs(br.relays[(port, live_protocol)], live)
+                self.assertIs(br.relays[(port, dead_protocol)], replacement)
+                self.assertEqual(len(br.relays), 2)
+                command.assert_called_once_with(port, dead_protocol)
+                spawn.assert_called_once_with(['mock-relay'])
+                terminate.assert_not_called()
