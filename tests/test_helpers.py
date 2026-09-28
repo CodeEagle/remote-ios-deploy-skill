@@ -310,6 +310,44 @@ class TunnelWatchdogTests(unittest.TestCase):
         self.assertGreater(br.last_tunnel_activity, 0.0)
         self.assertTrue(br.had_tunnel)
 
+    def test_no_retry_within_renew_window(self):
+        auto = self._load_auto()
+        auto.TUNNEL_QUIET_TTL = 300.0
+        auto.RENEW_RETRY = 600.0
+        br = auto.Bridge()
+        br.had_tunnel = True
+        br.last_tunnel_activity = 1000.0
+        renew, _, _, _ = self._run_health(auto, br, [1301.0, 1900.0])
+        renew.assert_called_once_with()
+        self.assertFalse(br.had_tunnel)
+
+    def test_retries_after_renew_window_without_recovery(self):
+        auto = self._load_auto()
+        auto.TUNNEL_QUIET_TTL = 300.0
+        auto.RENEW_RETRY = 600.0
+        br = auto.Bridge()
+        br.had_tunnel = True
+        br.last_tunnel_activity = 1000.0
+        renew, _, _, _ = self._run_health(auto, br, [1301.0, 1902.0, 2503.0])
+        self.assertEqual(renew.call_count, 3)
+        self.assertFalse(br.had_tunnel)
+        self.assertGreater(br.last_renew_time, 0.0)
+
+    def test_tunnel_activity_clears_renew_retry(self):
+        auto = self._load_auto()
+        br = auto.Bridge()
+        br.had_tunnel = False
+        br.last_renew_time = 1000.0
+        # A negotiated endpoint both rearms the watchdog and ends any retry
+        # cycle, so a device that recovers stops being renewed.
+        with mock.patch.object(auto, 'subprocess') as sub:
+            sub.run.return_value.stdout = (
+                "Got tunnel endpoint: '127.0.0.1%en1:49999'")
+            ports = br.poll_endpoints()
+        self.assertEqual(ports, [49999])
+        self.assertTrue(br.had_tunnel)
+        self.assertEqual(br.last_renew_time, 0.0)
+
     def test_reap_dead_preserves_live_half(self):
         auto = self._load_auto()
         for dead_protocol, live_protocol in [('TCP', 'UDP'), ('UDP', 'TCP')]:

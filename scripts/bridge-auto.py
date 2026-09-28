@@ -67,6 +67,13 @@ TUNNEL_BANDS = [(49800, 50000), (55000, 55300)]
 # established on demand, so idle devices emit no endpoint events. Renew only
 # once when observed tunnel activity becomes quiet; new activity rearms it.
 TUNNEL_QUIET_TTL = float(os.environ.get("TUNNEL_QUIET_TTL", "300"))
+# A renew that fails to bring the tunnel back must not permanently disable the
+# watchdog: had_tunnel stays false until the next endpoint event, so without a
+# retry the daemon can wait forever for a browse event a quiet record never
+# generates. After RENEW_RETRY seconds without recovery the loop renews again,
+# periodically until the tunnel returns. A device that has never had a tunnel
+# still never triggers (last_renew_time stays 0).
+RENEW_RETRY = float(os.environ.get("RENEW_RETRY", "600"))
 
 
 def _local_lan_ipv4() -> str:
@@ -142,6 +149,7 @@ class Bridge:
         self.log_proc: asyncio.subprocess.Process | None = None
         self.last_tunnel_activity = time.time()
         self.had_tunnel: bool = False
+        self.last_renew_time: float = 0.0
         self.stopping = False
         self.control_ok = False
         self.lookback = POLL_LOOKBACK_START
@@ -315,6 +323,7 @@ class Bridge:
         if ports:
             self.last_tunnel_activity = time.time()
             self.had_tunnel = True
+            self.last_renew_time = 0.0
         self.lookback = POLL_LOOKBACK_START if ports else min(self.lookback * 2,
                                                               POLL_LOOKBACK_MAX)
         return ports
@@ -339,6 +348,7 @@ class Bridge:
                 for match in ENDPOINT_RE.finditer(raw.decode("utf-8", "replace")):
                     self.last_tunnel_activity = time.time()
                     self.had_tunnel = True
+                    self.last_renew_time = 0.0
                     self.up(int(match.group(1)))
             if not self.stopping:
                 print("[watch] log stream ended; restarting", flush=True)
@@ -435,16 +445,22 @@ async def main() -> int:
             # remotepairingd gives no signal when a control channel dies while
             # the TCP control port still answers, so probe_control() alone
             # reports health while the device is in fact unavailable. Renew
-            # once after observed tunnel activity goes quiet, then wait for
-            # new activity to rearm: an idle device needs no tunnel.
+            # once when observed tunnel activity goes quiet, then wait for
+            # new activity to rearm: an idle device needs no tunnel. A renew
+            # that brought nothing back is retried after RENEW_RETRY, so a
+            # single failed renew cannot strand the device forever.
+            quiet = now - bridge.last_tunnel_activity > TUNNEL_QUIET_TTL
+            retry_due = bool(bridge.last_renew_time) and \
+                now - bridge.last_renew_time > RENEW_RETRY
             if (not bridge.stopping and bridge.publisher is not None
                     and bridge.publisher.poll() is None
-                    and bridge.had_tunnel
-                    and now - bridge.last_tunnel_activity > TUNNEL_QUIET_TTL):
+                    and ((bridge.had_tunnel and quiet) or retry_due)):
                 bridge.last_tunnel_activity = now
-                print("[health] no tunnel endpoint for "
-                      f"{TUNNEL_QUIET_TTL:.0f}s; renewing advert",
-                      flush=True)
+                bridge.last_renew_time = now
+                reason = "no tunnel endpoint for " \
+                    f"{TUNNEL_QUIET_TTL:.0f}s" if bridge.had_tunnel \
+                    else f"no recovery {RENEW_RETRY:.0f}s after renew"
+                print(f"[health] {reason}; renewing advert", flush=True)
                 bridge.renew_advert()
                 bridge.had_tunnel = False
 
