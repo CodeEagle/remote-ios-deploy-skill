@@ -205,7 +205,7 @@ class TunnelWatchdogTests(unittest.TestCase):
         br.renew_advert()          # already exited: no-op, no exception
         self.assertIsNotNone(dead.returncode)
 
-    def _run_health(self, auto, br, ticks):
+    def _run_health(self, auto, br, ticks, probe=True):
         # Exercise main's real condition without network, subprocesses or signals.
         clock = mock.Mock(return_value=1000.0)
         ticks = iter(ticks)
@@ -223,7 +223,7 @@ class TunnelWatchdogTests(unittest.TestCase):
         br.poll_due = float('inf')
         with mock.patch.object(auto, 'Bridge', return_value=br), \
              mock.patch.object(auto.shutil, 'which', return_value='/mock/tool'), \
-             mock.patch.object(auto, 'probe_control', return_value=True), \
+             mock.patch.object(auto, 'probe_control', return_value=probe), \
              mock.patch.object(auto.time, 'time', clock), \
              mock.patch.object(auto.asyncio, 'sleep', side_effect=sleep), \
              mock.patch.object(br, 'up') as up, \
@@ -291,6 +291,7 @@ class TunnelWatchdogTests(unittest.TestCase):
         self.assertEqual(ports, [49999])
         self.assertGreater(br.last_tunnel_activity, 0.0)
         self.assertTrue(br.had_tunnel)
+        self.assertTrue(br.ever_tunnel)
 
     def test_watch_tunnel_activity_rearms_watchdog(self):
         auto = self._load_auto()
@@ -309,6 +310,7 @@ class TunnelWatchdogTests(unittest.TestCase):
         up.assert_called_once_with(49999)
         self.assertGreater(br.last_tunnel_activity, 0.0)
         self.assertTrue(br.had_tunnel)
+        self.assertTrue(br.ever_tunnel)
 
     def test_no_retry_within_renew_window(self):
         auto = self._load_auto()
@@ -347,6 +349,44 @@ class TunnelWatchdogTests(unittest.TestCase):
         self.assertEqual(ports, [49999])
         self.assertTrue(br.had_tunnel)
         self.assertEqual(br.last_renew_time, 0.0)
+
+    def test_idle_renews_once_after_control_up_ttl(self):
+        auto = self._load_auto()
+        auto.IDLE_RENEW_TTL = 100.0
+        br = auto.Bridge()
+        # probe_control() is mocked true, so main() sets control_since at the
+        # clock's start (1000.0); 101s later the stale branch renews the advert.
+        self.assertFalse(br.ever_tunnel)
+        renew, _, _, _ = self._run_health(auto, br, [1101.0])
+        renew.assert_called_once_with()
+        self.assertFalse(br.had_tunnel)
+        self.assertGreater(br.last_renew_time, 0.0)
+
+    def test_stale_renew_throttled_by_retry_window(self):
+        auto = self._load_auto()
+        auto.IDLE_RENEW_TTL = 100.0
+        auto.RENEW_RETRY = 600.0
+        br = auto.Bridge()
+        # Renew at 1101s; 1200s sits inside the retry window (no renew), 1703s
+        # is past it so exactly one more renew goes out.
+        renew, _, _, _ = self._run_health(auto, br, [1101.0, 1200.0, 1703.0])
+        self.assertEqual(renew.call_count, 2)
+        self.assertFalse(br.had_tunnel)
+
+    def test_tunnel_activity_disables_stale_renew(self):
+        auto = self._load_auto()
+        auto.IDLE_RENEW_TTL = 100.0
+        br = auto.Bridge()
+        br.ever_tunnel = True
+        renew, _, _, _ = self._run_health(auto, br, [1101.0, 3000.0])
+        renew.assert_not_called()
+
+    def test_control_unreachable_does_not_stale_renew(self):
+        auto = self._load_auto()
+        auto.IDLE_RENEW_TTL = 100.0
+        br = auto.Bridge()
+        renew, _, _, _ = self._run_health(auto, br, [2000.0, 3000.0], probe=False)
+        renew.assert_not_called()
 
     def test_reap_dead_preserves_live_half(self):
         auto = self._load_auto()

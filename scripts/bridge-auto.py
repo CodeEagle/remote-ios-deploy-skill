@@ -74,6 +74,16 @@ TUNNEL_QUIET_TTL = float(os.environ.get("TUNNEL_QUIET_TTL", "300"))
 # periodically until the tunnel returns. A device that has never had a tunnel
 # still never triggers (last_renew_time stays 0).
 RENEW_RETRY = float(os.environ.get("RENEW_RETRY", "600"))
+# A bridge that starts while the phone is already gone, or while the daemon is
+# in backoff, can live its whole life without a single tunnel endpoint event:
+# had_tunnel stays false and last_renew_time stays 0, so neither the quiet
+# watchdog nor RENEW_RETRY above ever fires. remotepairingd, having given up,
+# then waits forever for a browse event a record that stays published never
+# generates. When the control port has been reachable this long without any
+# endpoint at all, renew the advert anyway to wake the daemon back up — gated
+# on reachability so an unreachable or unpaired device is not hammered, and
+# throttled by RENEW_RETRY.
+IDLE_RENEW_TTL = float(os.environ.get("IDLE_RENEW_TTL", "1800"))
 
 
 def _local_lan_ipv4() -> str:
@@ -152,6 +162,8 @@ class Bridge:
         self.last_renew_time: float = 0.0
         self.stopping = False
         self.control_ok = False
+        self.ever_tunnel = False
+        self.control_since = 0.0
         self.lookback = POLL_LOOKBACK_START
         self.poll_due = 0.0
         self.bootstrap_retry = 0.0
@@ -323,6 +335,7 @@ class Bridge:
         if ports:
             self.last_tunnel_activity = time.time()
             self.had_tunnel = True
+            self.ever_tunnel = True
             self.last_renew_time = 0.0
         self.lookback = POLL_LOOKBACK_START if ports else min(self.lookback * 2,
                                                               POLL_LOOKBACK_MAX)
@@ -348,6 +361,7 @@ class Bridge:
                 for match in ENDPOINT_RE.finditer(raw.decode("utf-8", "replace")):
                     self.last_tunnel_activity = time.time()
                     self.had_tunnel = True
+                    self.ever_tunnel = True
                     self.last_renew_time = 0.0
                     self.up(int(match.group(1)))
             if not self.stopping:
@@ -407,6 +421,7 @@ async def main() -> int:
         loop.add_signal_handler(sig, bridge.stop)
 
     bridge.control_ok = probe_control()
+    bridge.control_since = time.time() if bridge.control_ok else 0.0
     print(f"[probe] [{PHONE}]:{CONTROL_PORT} "
           f"{'OPEN' if bridge.control_ok else 'CLOSED'}", flush=True)
     if not bridge.control_ok:
@@ -452,14 +467,21 @@ async def main() -> int:
             quiet = now - bridge.last_tunnel_activity > TUNNEL_QUIET_TTL
             retry_due = bool(bridge.last_renew_time) and \
                 now - bridge.last_renew_time > RENEW_RETRY
+            stale = (not bridge.ever_tunnel and bridge.control_since
+                     and now - bridge.control_since > IDLE_RENEW_TTL
+                     and (not bridge.last_renew_time or retry_due))
             if (not bridge.stopping and bridge.publisher is not None
                     and bridge.publisher.poll() is None
-                    and ((bridge.had_tunnel and quiet) or retry_due)):
+                    and ((bridge.had_tunnel and quiet) or retry_due or stale)):
                 bridge.last_tunnel_activity = now
                 bridge.last_renew_time = now
-                reason = "no tunnel endpoint for " \
-                    f"{TUNNEL_QUIET_TTL:.0f}s" if bridge.had_tunnel \
-                    else f"no recovery {RENEW_RETRY:.0f}s after renew"
+                if bridge.had_tunnel:
+                    reason = f"no tunnel endpoint for {TUNNEL_QUIET_TTL:.0f}s"
+                elif retry_due:
+                    reason = f"no recovery {RENEW_RETRY:.0f}s after renew"
+                else:
+                    reason = f"no tunnel endpoint {IDLE_RENEW_TTL:.0f}s after " \
+                        "control came up"
                 print(f"[health] {reason}; renewing advert", flush=True)
                 bridge.renew_advert()
                 bridge.had_tunnel = False
@@ -471,6 +493,7 @@ async def main() -> int:
                     print(f"[health] control {bridge.control_ok} -> {alive}",
                           flush=True)
                     bridge.control_ok = alive
+                    bridge.control_since = now if alive else 0.0
                     bridge.lookback = POLL_LOOKBACK_MAX
                 if not alive:
                     for port in bridge.poll_endpoints():
