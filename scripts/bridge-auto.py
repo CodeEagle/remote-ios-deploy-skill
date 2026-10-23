@@ -56,7 +56,9 @@ PREFETCH = int(os.environ.get("PREFETCH", "8"))
 IDLE_TTL = float(os.environ.get("IDLE_TTL", "600"))
 CLEAN_INTERVAL = float(os.environ.get("CLEAN_INTERVAL", "60"))
 HEALTH_INTERVAL = 10.0
+HEARTBEAT_INTERVAL = float(os.environ.get("HEARTBEAT_INTERVAL", "300"))
 POLL_INTERVAL = 15.0
+POLL_DOWN_INTERVAL = float(os.environ.get("POLL_DOWN_INTERVAL", "60"))
 BOOTSTRAP_RETRY = 20.0
 POLL_LOOKBACK_START = 30
 POLL_LOOKBACK_MAX = 600
@@ -110,6 +112,36 @@ def _random_auth_tag() -> str:
     return "".join(alphabet[b & 61] for b in os.urandom(8))
 
 
+LOG_MAX_BYTES = int(os.environ.get("LOG_MAX_BYTES", str(10 * 1024 * 1024)))
+LOG_PATH = os.environ.get("LOG_PATH") or None  # set when stdout is a file
+
+
+def log(msg: str) -> None:
+    """Own state lines carry a timestamp; socat's per-connection notices do
+    not, and mixing them made the (month-long) log unreadable for triage."""
+    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
+
+
+def rotate_log_if_needed() -> None:
+    """launchd never rotates. Without a cap the resident bridge's log grows
+    unbounded (observed: ~7M lines / month, mostly socat notices). Copy-truncate,
+    NOT rename: launchd holds the original fd open, so a renamed file would keep
+    receiving every new line and rotation would do nothing."""
+    if not LOG_PATH:
+        return
+    try:
+        if os.path.getsize(LOG_PATH) < LOG_MAX_BYTES:
+            return
+    except OSError:
+        return
+    try:
+        shutil.copyfile(LOG_PATH, LOG_PATH + ".1")
+        with open(LOG_PATH, "r+") as fh:
+            fh.truncate(0)
+    except OSError:
+        pass
+
+
 PHONE = os.environ.get("PHONE") or (sys.argv[1] if len(sys.argv) > 1 else "")
 if not PHONE:
     raise SystemExit("Set PHONE to the phone's overlay address (or pass it as argv[1])")
@@ -136,7 +168,10 @@ def relay_command(port: int, protocol: str) -> list[str]:
     target = f"[{PHONE}]:{port}" if REMOTE_VERSION == 6 else f"{PHONE}:{port}"
     if protocol == "TCP":
         target += ",connect-timeout=5"
-    return [shutil.which("socat"), "-d", "-d",
+    # socat's `-d -d` per-connection notices produced ~7M lines/month; the
+    # bridge's own relay up/down lines already cover the lifecycle. Bind and
+    # runtime failures still reach the log without any verbosity flag.
+    return [shutil.which("socat"),
             f"{protocol}{LOCAL_VERSION}-LISTEN:{port},bind={LOCAL_IP},reuseaddr,fork",
             f"{protocol}:{target}"]
 
@@ -217,8 +252,8 @@ class Bridge:
         for protocol in ("TCP", "UDP"):
             if (port, protocol) not in self.relays:
                 self.relays[(port, protocol)] = self._spawn(relay_command(port, protocol))
-        print(f"[relay:{'warmup' if warmup else 'dynamic'}] up {port} "
-              f"(TCP+UDP) -> [{PHONE}]:{port}", flush=True)
+        log(f"[relay:{'warmup' if warmup else 'dynamic'}] up {port} "
+              f"(TCP+UDP) -> [{PHONE}]:{port}")
         if warmup:
             self.prefetched.add(port)
         elif port != CONTROL_PORT:
@@ -271,8 +306,7 @@ class Bridge:
                                       capture_output=True, timeout=10)
                 if gone.returncode != 0:
                     break
-            print(f"[relay] reclaimed orphan listener {pid} on {port}",
-                  flush=True)
+            log(f"[relay] reclaimed orphan listener {pid} on {port}")
 
     def down(self, port: int) -> None:
         for protocol in ("TCP", "UDP"):
@@ -281,7 +315,7 @@ class Bridge:
                 self._terminate(child)
         self.prefetched.discard(port)
         self.last_seen.pop(port, None)
-        print(f"[relay] down {port} (idle)", flush=True)
+        log(f"[relay] down {port} (idle)")
 
     def publish(self) -> None:
         if self.stopping:
@@ -293,8 +327,8 @@ class Bridge:
             str(CONTROL_PORT), SPOOF_HOSTNAME, LOCAL_IP,
             f"identifier={RP_INSTANCE}", f"authTag={RP_AUTHTAG}",
             f"ver={RP_VER}", f"minVer={RP_MINVER}", f"flags={RP_FLAGS}"])
-        print(f"[publish] {RP_INSTANCE} authTag={RP_AUTHTAG} "
-              f"@ {LOCAL_IP}:{CONTROL_PORT}", flush=True)
+        log(f"[publish] {RP_INSTANCE} authTag={RP_AUTHTAG} "
+              f"@ {LOCAL_IP}:{CONTROL_PORT}")
 
     def renew_advert(self) -> None:
         """Force a Bonjour remove/add so remotepairingd re-discovers the device.
@@ -307,15 +341,14 @@ class Bridge:
         if self.publisher is None or self.publisher.poll() is not None:
             return
         self._terminate(self.publisher, sig=signal.SIGKILL)
-        print("[publish] renewing advert to re-trigger discovery", flush=True)
+        log("[publish] renewing advert to re-trigger discovery")
 
     def reap_dead(self) -> None:
         for key in list(self.relays):
             child = self.relays[key]
             if child.poll() is not None:
                 self.relays.pop(key, None)
-                print(f"[relay] {key} exited early (rc={child.returncode})",
-                      flush=True)
+                log(f"[relay] {key} exited early (rc={child.returncode})")
         # A relay that died — usually a lost bind to a leftover listener —
         # must be re-laid, or the bridge advertises a port it cannot serve.
         for port in list(self.last_seen):
@@ -365,7 +398,7 @@ class Bridge:
                     self.last_renew_time = 0.0
                     self.up(int(match.group(1)))
             if not self.stopping:
-                print("[watch] log stream ended; restarting", flush=True)
+                log("[watch] log stream ended; restarting")
                 await asyncio.sleep(5)
 
     async def _busy_ports(self) -> set[int]:
@@ -409,6 +442,20 @@ class Bridge:
             self._terminate(child)
 
 
+def _resolve_log_path() -> None:
+    global LOG_PATH
+    if LOG_PATH:
+        return
+    # launchd redirects stdout to the plist's StandardOutPath; sys.stdout then
+    # carries that absolute path, so rotation can cap exactly that file.
+    try:
+        path = getattr(sys.stdout, "name", None)
+        if path and os.path.isabs(path):
+            LOG_PATH = path
+    except Exception:
+        pass
+
+
 async def main() -> int:
     for tool in ("socat", "dns-sd", "log", "lsof"):
         if not shutil.which(tool):
@@ -422,39 +469,49 @@ async def main() -> int:
 
     bridge.control_ok = probe_control()
     bridge.control_since = time.time() if bridge.control_ok else 0.0
-    print(f"[probe] [{PHONE}]:{CONTROL_PORT} "
-          f"{'OPEN' if bridge.control_ok else 'CLOSED'}", flush=True)
+    log(f"[probe] [{PHONE}]:{CONTROL_PORT} "
+          f"{'OPEN' if bridge.control_ok else 'CLOSED'}")
     if not bridge.control_ok:
-        print("Control port closed: phone may be offline, not associated with "
-              "Wi-Fi, or the overlay route is down. Continuing to publish "
-              "anyway; it will connect when the phone becomes reachable.",
-              file=sys.stderr, flush=True)
+        log("Control port closed: phone may be offline, not associated with "
+        "Wi-Fi, or the overlay route is down. Continuing to publish "
+        "anyway; it will connect when the phone becomes reachable.")
 
+    _resolve_log_path()
+    rotate_log_if_needed()
     bridge.up(CONTROL_PORT)
     await asyncio.sleep(0.2)
     bridge.reap_dead()
     ports = bridge.poll_endpoints()
     if ports:
         bridge.up(ports[-1])
-        print(f"[bootstrap] latest known endpoint {ports[-1]}", flush=True)
+        log(f"[bootstrap] latest known endpoint {ports[-1]}")
     else:
         bridge.bootstrap_retry = time.time() + BOOTSTRAP_RETRY
-        print(f"[bootstrap] no endpoint yet; retry in {BOOTSTRAP_RETRY:.0f}s", flush=True)
+        log(f"[bootstrap] no endpoint yet; retry in {BOOTSTRAP_RETRY:.0f}s")
     bridge.publish()
 
     tasks = [asyncio.create_task(bridge.watch()),
              asyncio.create_task(bridge.cleanup_loop())]
     try:
+        last_heartbeat = time.time()
         while not bridge.stopping:
             await asyncio.sleep(HEALTH_INTERVAL)
             if bridge.stopping:
                 continue
             now = time.time()
             bridge.reap_dead()
+            if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+                last_heartbeat = now
+                rotate_log_if_needed()
+                relay_ports = {port for port, _ in bridge.relays}
+                age = int(now - bridge.last_tunnel_activity)
+                log("[heartbeat] "
+                      f"control={bridge.control_ok} relays={len(relay_ports)} "
+                      f"tunnel_activity={age}s_ago ever_tunnel={bridge.ever_tunnel}")
             if bridge.publisher is not None and bridge.publisher.poll() is not None:
                 if bridge.stopping:
                     continue
-                print("[publish] dns-sd exited; restarting", flush=True)
+                log("[publish] dns-sd exited; restarting")
                 bridge.publish()
 
             # remotepairingd gives no signal when a control channel dies while
@@ -482,25 +539,27 @@ async def main() -> int:
                 else:
                     reason = f"no tunnel endpoint {IDLE_RENEW_TTL:.0f}s after " \
                         "control came up"
-                print(f"[health] {reason}; renewing advert", flush=True)
+                log(f"[health] {reason}; renewing advert")
                 bridge.renew_advert()
                 bridge.had_tunnel = False
 
             if now >= bridge.poll_due:
-                bridge.poll_due = now + POLL_INTERVAL
                 alive = probe_control()
                 if alive != bridge.control_ok:
-                    print(f"[health] control {bridge.control_ok} -> {alive}",
-                          flush=True)
+                    log(f"[health] control {bridge.control_ok} -> {alive}")
                     bridge.control_ok = alive
                     bridge.control_since = now if alive else 0.0
                     bridge.lookback = POLL_LOOKBACK_MAX
                 if not alive:
-                    for port in bridge.poll_endpoints():
-                        bridge.up(port)
+                    # `log show` endpoint sweep + relays need a live control
+                    # channel; probing only while the phone is unreachable
+                    # burns CPU for ports that cannot be re-negotiated. Probe
+                    # less often, too.
+                    bridge.poll_due = now + POLL_DOWN_INTERVAL
                     if not any(p != CONTROL_PORT for p in bridge.last_seen):
                         bridge.sweep_tunnel_bands()
                 elif bridge.control_ok:
+                    bridge.poll_due = now + POLL_INTERVAL
                     # Control channel is up: a warmup port whose socat has
                     # died is stale, not a reason to re-sweep the bands.
                     bridge.reap_dead()
@@ -509,7 +568,7 @@ async def main() -> int:
                     found = bridge.poll_endpoints()
                     if found:
                         bridge.up(found[-1])
-                        print(f"[bootstrap] late endpoint {found[-1]}", flush=True)
+                        log(f"[bootstrap] late endpoint {found[-1]}")
                     else:
                         bridge.bootstrap_retry = now + BOOTSTRAP_RETRY
     finally:

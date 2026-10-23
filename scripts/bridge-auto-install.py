@@ -162,20 +162,22 @@ def main() -> int:
         return 1
     python = shutil.which("python3") or sys.executable
 
+    # launchd gives stdout no path Python can discover (sys.stdout.name is
+    # always '<stdout>'), so the log path is passed as an env var too: the
+    # bridge's copy-truncate rotation has to find the exact file.
+    log_path = os.path.expanduser(f"~/Library/Logs/{args.label}.log")
     plist = {
         "Label": args.label,
         "ProgramArguments": [python, script],
         "WorkingDirectory": repo_root(),
-        "EnvironmentVariables": {"PATH": LAUNCHD_PATH, **resolved},
+        "EnvironmentVariables": {"PATH": LAUNCHD_PATH, "LOG_PATH": log_path, **resolved},
         "RunAtLoad": True,
         "KeepAlive": True,
         # Crash-restart throttle, and time for old socat children to drain.
         "ThrottleInterval": 20,
         "ExitTimeOut": 30,
-        "StandardOutPath": os.path.expanduser(
-            f"~/Library/Logs/{args.label}.log"),
-        "StandardErrorPath": os.path.expanduser(
-            f"~/Library/Logs/{args.label}.log"),
+        "StandardOutPath": log_path,
+        "StandardErrorPath": log_path,
     }
 
     print(f"\nInstalling LaunchAgent {args.label}")
