@@ -86,6 +86,12 @@ RENEW_RETRY = float(os.environ.get("RENEW_RETRY", "600"))
 # on reachability so an unreachable or unpaired device is not hammered, and
 # throttled by RENEW_RETRY.
 IDLE_RENEW_TTL = float(os.environ.get("IDLE_RENEW_TTL", "1800"))
+# A phone returning after hours of offline finds a record that never stopped
+# being published; remotepairingd does not re-browse it, so the device stays
+# "unavailable" in Xcode until the IDLE_RENEW_TTL stale timer eventually fires.
+# On the control False->True edge, renew once after this short window if no
+# tunnel endpoint appeared on its own; any endpoint activity disarms it.
+RECOVERY_RENEW_DELAY = float(os.environ.get("RECOVERY_RENEW_DELAY", "120"))
 
 
 def _local_lan_ipv4() -> str:
@@ -199,6 +205,7 @@ class Bridge:
         self.control_ok = False
         self.ever_tunnel = False
         self.control_since = 0.0
+        self.recovery_renew_due = 0.0
         self.lookback = POLL_LOOKBACK_START
         self.poll_due = 0.0
         self.bootstrap_retry = 0.0
@@ -370,6 +377,7 @@ class Bridge:
             self.had_tunnel = True
             self.ever_tunnel = True
             self.last_renew_time = 0.0
+            self.recovery_renew_due = 0.0
         self.lookback = POLL_LOOKBACK_START if ports else min(self.lookback * 2,
                                                               POLL_LOOKBACK_MAX)
         return ports
@@ -396,6 +404,7 @@ class Bridge:
                     self.had_tunnel = True
                     self.ever_tunnel = True
                     self.last_renew_time = 0.0
+                    self.recovery_renew_due = 0.0
                     self.up(int(match.group(1)))
             if not self.stopping:
                 log("[watch] log stream ended; restarting")
@@ -550,6 +559,24 @@ async def main() -> int:
                     bridge.control_ok = alive
                     bridge.control_since = now if alive else 0.0
                     bridge.lookback = POLL_LOOKBACK_MAX
+                    if alive:
+                        # Phone just became reachable: the record has been up
+                        # the whole time, so arm a short discovery wake-up in
+                        # case remotepairingd does not reconnect on its own.
+                        bridge.recovery_renew_due = now + RECOVERY_RENEW_DELAY
+
+            # The phone came back but no tunnel endpoint appeared: renew the
+            # advert once so remotepairingd sees a fresh browse event instead
+            # of waiting out IDLE_RENEW_TTL.
+            if (bridge.recovery_renew_due and now >= bridge.recovery_renew_due
+                    and not bridge.stopping
+                    and bridge.publisher is not None
+                    and bridge.publisher.poll() is None):
+                bridge.recovery_renew_due = 0.0
+                bridge.last_renew_time = now
+                log("[health] no endpoint after phone recovery; "
+                    "renewing advert")
+                bridge.renew_advert()
                 if not alive:
                     # `log show` endpoint sweep + relays need a live control
                     # channel; probing only while the phone is unreachable
